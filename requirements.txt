@@ -1,0 +1,14 @@
+pandas
+numpy
+yfinance
+scikit-learn
+xgboost
+tensorflow
+transformers
+datasets
+joblib
+ta
+torch
+accelerate
+ibm-watson-machine-learning
+python-dotenv
