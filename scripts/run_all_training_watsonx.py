@@ -46,7 +46,8 @@ def upload_datasets(client, datasets: Dict[str, str], dry_run: bool = False) -> 
             print(f"[orchestrator] DRY-RUN: would upload data asset '{name}' from {path}")
             continue
         print(f"[orchestrator] Uploading data asset '{name}' from {path}...")
-        client.data_assets.create({"name": name, "description": f"{name} dataset"}, file_path=path)
+        # The SDK expects a string name, not a metadata dict
+        client.data_assets.create(name=name, file_path=path)
 
 
 def planned_jobs() -> List[Tuple[str, str, str]]:
