@@ -95,35 +95,55 @@ def compute_features_for_symbol(df: pd.DataFrame, cfg: BuildConfig) -> pd.DataFr
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("ta is required. Install it via pip install ta") from exc
 
+    # Flatten potential MultiIndex columns (e.g., from some data sources)
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.copy()
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+
     df = df.sort_values("date").copy()
 
-    df["return_1d"] = df["Close"].pct_change()
+    # Ensure Close is a 1D numeric Series
+    if "Close" not in df.columns and "Adj Close" in df.columns:
+        df["Close"] = df["Adj Close"]
+    close = df.get("Close")
+    if close is None:
+        raise ValueError("Input frame must contain a 'Close' or 'Adj Close' column")
+    if isinstance(close, pd.DataFrame):
+        # Reduce to first column if duplicate column names created a DataFrame
+        if close.shape[1] == 1:
+            close = close.iloc[:, 0]
+        else:
+            print("[dataset-builder][warning] 'Close' has multiple columns; using the first one.")
+            close = close.iloc[:, 0]
+    close = pd.to_numeric(close, errors="coerce")
+
+    df["return_1d"] = close.pct_change()
     df["log_return_1d"] = np.log1p(df["return_1d"].fillna(0.0))
 
-    rsi = ta.momentum.RSIIndicator(close=df["Close"], window=cfg.rsi_window)
+    rsi = ta.momentum.RSIIndicator(close=close, window=cfg.rsi_window)
     df["rsi"] = rsi.rsi()
 
-    df["ema"] = df["Close"].ewm(span=cfg.ema_window, adjust=False).mean()
-    df["ema_dist"] = (df["Close"] - df["ema"]) / df["ema"]
+    df["ema"] = close.ewm(span=cfg.ema_window, adjust=False).mean()
+    df["ema_dist"] = (close - df["ema"]) / df["ema"]
 
-    macd = ta.trend.MACD(close=df["Close"])  # defaults (12, 26, 9)
+    macd = ta.trend.MACD(close=close)  # defaults (12, 26, 9)
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
     df["macd_diff"] = macd.macd_diff()
 
-    bb = ta.volatility.BollingerBands(close=df["Close"], window=cfg.bb_window)
+    bb = ta.volatility.BollingerBands(close=close, window=cfg.bb_window)
     df["bb_high"] = bb.bollinger_hband()
     df["bb_low"] = bb.bollinger_lband()
-    df["bb_pct"] = (df["Close"] - df["bb_low"]) / (df["bb_high"] - df["bb_low"])
+    df["bb_pct"] = (close - df["bb_low"]) / (df["bb_high"] - df["bb_low"])
 
-    df["fwd_return_1d"] = df["Close"].pct_change().shift(-1)
+    df["fwd_return_1d"] = close.pct_change().shift(-1)
     df[f"fwd_return_{cfg.lookahead_days}d"] = (
-        df["Close"].pct_change(cfg.lookahead_days).shift(-cfg.lookahead_days)
+        close.pct_change(cfg.lookahead_days).shift(-cfg.lookahead_days)
     )
 
-    rolling_mean = df["Close"].rolling(cfg.zscore_window).mean()
-    rolling_std = df["Close"].rolling(cfg.zscore_window).std()
-    df["zscore"] = (df["Close"] - rolling_mean) / rolling_std
+    rolling_mean = close.rolling(cfg.zscore_window).mean()
+    rolling_std = close.rolling(cfg.zscore_window).std()
+    df["zscore"] = (close - rolling_mean) / rolling_std
 
     return df
 
