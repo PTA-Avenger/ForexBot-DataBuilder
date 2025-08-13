@@ -28,6 +28,9 @@ class BuildConfig:
     file_format: str = "csv"  # csv | parquet
 
 
+MACD_MIN_EFFECTIVE_WINDOW = 35  # approx slow(26)+signal(9)
+
+
 def ensure_dirs(base_output_dir: str) -> dict:
     raw_dir = os.path.join(base_output_dir, "raw")
     processed_dir = os.path.join(base_output_dir, "processed")
@@ -103,7 +106,7 @@ def compute_features_for_symbol(df: pd.DataFrame, cfg: BuildConfig) -> pd.DataFr
     df["ema"] = df["Close"].ewm(span=cfg.ema_window, adjust=False).mean()
     df["ema_dist"] = (df["Close"] - df["ema"]) / df["ema"]
 
-    macd = ta.trend.MACD(close=df["Close"])
+    macd = ta.trend.MACD(close=df["Close"])  # defaults (12, 26, 9)
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
     df["macd_diff"] = macd.macd_diff()
@@ -126,7 +129,6 @@ def compute_features_for_symbol(df: pd.DataFrame, cfg: BuildConfig) -> pd.DataFr
 
 
 def compute_technical_features(df: pd.DataFrame, cfg: BuildConfig, n_workers: Optional[int] = None) -> pd.DataFrame:
-    # Compute per symbol to avoid cross-series leakage and enable parallelism
     groups = [g for _, g in df.groupby("ticker", sort=False)]
     if n_workers and n_workers > 1 and len(groups) > 1:
         results: List[pd.DataFrame] = []
@@ -187,6 +189,10 @@ def build_sentiment_stub(processed_dir: str, file_format: str) -> str:
     return sentiment_path
 
 
+def min_required_rows(cfg: BuildConfig) -> int:
+    return max(cfg.rsi_window, cfg.ema_window, cfg.bb_window, cfg.zscore_window, MACD_MIN_EFFECTIVE_WINDOW) + cfg.lookahead_days + 2
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="Build Forex datasets (trend, mean-reversion, sentiment stub)")
     parser.add_argument("--tickers", type=str, default="EURUSD=X,GBPUSD=X,USDJPY=X,AUDUSD=X", help="Comma-separated tickers")
@@ -199,6 +205,11 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--n-workers", type=int, default=8, help="Number of worker threads for download/feature computation")
     parser.add_argument("--force", action="store_true", help="Force re-download/rebuild even if raw files exist")
     parser.add_argument("--file-format", type=str, choices=["csv", "parquet"], default="csv", help="Output file format for processed datasets")
+    parser.add_argument("--rsi-window", type=int, default=14, help="RSI window")
+    parser.add_argument("--ema-window", type=int, default=10, help="EMA span for distance feature")
+    parser.add_argument("--bb-window", type=int, default=20, help="Bollinger Bands window")
+    parser.add_argument("--zscore-window", type=int, default=10, help="Rolling window for z-score")
+    parser.add_argument("--zscore-threshold", type=float, default=1.0, help="Threshold for mean-reversion target labeling")
 
     args = parser.parse_args(argv)
 
@@ -213,6 +224,11 @@ def main(argv: List[str]) -> int:
         n_workers=max(1, int(args.n_workers)),
         force=bool(args.force),
         file_format=str(args.file_format),
+        rsi_window=int(args.rsi_window),
+        ema_window=int(args.ema_window),
+        bb_window=int(args.bb_window),
+        zscore_window=int(args.zscore_window),
+        zscore_threshold=float(args.zscore_threshold),
     )
 
     dirs = ensure_dirs(cfg.output_dir)
@@ -243,6 +259,13 @@ def main(argv: List[str]) -> int:
 
     full = pd.concat(all_hist, ignore_index=True)
 
+    # Diagnostics: check per-ticker row counts vs minimum required
+    required = min_required_rows(cfg)
+    rows_by_ticker = full.groupby("ticker").size().to_dict()
+    for t, n in rows_by_ticker.items():
+        if n < required:
+            print(f"[dataset-builder][warning] {t} has only {n} rows, but at least {required} are recommended for current windows.")
+
     print("[dataset-builder] Computing technical features...")
     feat = compute_technical_features(full, cfg, n_workers=cfg.n_workers)
 
@@ -251,6 +274,11 @@ def main(argv: List[str]) -> int:
     trend_path = os.path.join(dirs["processed"], f"trend_dataset.{cfg.file_format}")
     _save_df(trend_df, trend_path, cfg.file_format)
     print(f"[dataset-builder] Wrote {trend_path} ({len(trend_df)} rows)")
+    if len(trend_df) == 0:
+        print("[dataset-builder][advice] Trend dataset is empty after dropna.")
+        print(f"[dataset-builder][advice] Increase history (e.g., --period 5y) or reduce windows (e.g., --rsi-window 7 --bb-window 10 --zscore-window 5 --lookahead-days 1).")
+        if cfg.offline:
+            print("[dataset-builder][advice] Or increase synthetic rows (e.g., --synthetic-rows 1000).")
 
     print("[dataset-builder] Building mean-reversion dataset...")
     meanrev_df = build_meanrev_dataset(feat, cfg)
