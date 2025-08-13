@@ -111,42 +111,57 @@ def _resolve_software_spec_id(client, preferred_names: List[str]) -> str:
 
 
 def submit_training_job(client, job_name: str, script_path: str, software_spec_name: str, hardware_name: str, hardware_nodes: int, wait: bool = False) -> Optional[str]:
-    # Ensure the SDK supports training definitions API
-    if not hasattr(client, "training_definitions"):
-        raise RuntimeError(
-            "Your installed ibm-watson-machine-learning client does not support training_definitions. "
-            "Please upgrade the package in your venv: pip install -U ibm-watson-machine-learning. "
-            "After upgrading, retry with --real."
-        )
-    td = client.training_definitions
-    tr = client.training
-
-    sw_id = _resolve_software_spec_id(client, [software_spec_name, "default_py3.10", "runtime-22.2-py3.10", "python-3.10"])
-
+    # Prefer training_definitions if available, otherwise fall back to repository API
     code_zip = _zip_code(script_path)
     command = f"python {os.path.basename(script_path)}"
 
-    meta = {
-        td.ConfigurationMetaNames.NAME: job_name,
-        td.ConfigurationMetaNames.DESCRIPTION: f"Training job for {job_name}",
-        td.ConfigurationMetaNames.SOFTWARE_SPEC_UID: sw_id,
-        td.ConfigurationMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
-        td.ConfigurationMetaNames.COMMAND: command,
-    }
+    sw_id = _resolve_software_spec_id(client, [software_spec_name, "default_py3.10", "runtime-22.2-py3.10", "python-3.10"])
 
-    print(f"[orchestrator] Creating training definition for {job_name} (software_spec={software_spec_name}, hardware={hardware_name} x{hardware_nodes})")
-    td_details = td.store(meta_props=meta, training_definition=code_zip)
-    try:
-        td_id = td.get_id(td_details)
-    except Exception:
-        td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
-
-    print(f"[orchestrator] Submitting training run for {job_name}...")
-    run_details = tr.run(training_definition_id=td_id)
-    try:
-        job_id = tr.get_id(run_details)
-    except Exception:
-        job_id = run_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+    if hasattr(client, "training_definitions"):
+        td = client.training_definitions
+        tr = client.training
+        meta = {
+            td.ConfigurationMetaNames.NAME: job_name,
+            td.ConfigurationMetaNames.DESCRIPTION: f"Training job for {job_name}",
+            td.ConfigurationMetaNames.SOFTWARE_SPEC_UID: sw_id,
+            td.ConfigurationMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
+            td.ConfigurationMetaNames.COMMAND: command,
+        }
+        print(f"[orchestrator] Creating training definition for {job_name} (software_spec={software_spec_name}, hardware={hardware_name} x{hardware_nodes})")
+        td_details = td.store(meta_props=meta, training_definition=code_zip)
+        try:
+            td_id = td.get_id(td_details)
+        except Exception:
+            td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+        print(f"[orchestrator] Submitting training run for {job_name}...")
+        run_details = tr.run(training_definition_id=td_id)
+        try:
+            job_id = tr.get_id(run_details)
+        except Exception:
+            job_id = run_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+    else:
+        # Repository fallback (compatible with ibm-watson-machine-learning 1.0.333)
+        repo = client.repository
+        tr = client.training
+        meta = {
+            repo.DefinitionMetaNames.NAME: job_name,
+            repo.DefinitionMetaNames.DESCRIPTION: f"Training job for {job_name}",
+            repo.DefinitionMetaNames.SOFTWARE_SPEC_UID: sw_id,
+            repo.DefinitionMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
+            repo.DefinitionMetaNames.COMMAND: command,
+        }
+        print(f"[orchestrator] Creating training definition (repository) for {job_name} (software_spec={software_spec_name}, hardware={hardware_name} x{hardware_nodes})")
+        td_details = repo.store_training_definition(training_definition=code_zip, meta_props=meta)
+        try:
+            td_id = repo.get_definition_uid(td_details)
+        except Exception:
+            td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+        print(f"[orchestrator] Submitting training run for {job_name}...")
+        run_details = tr.run(training_definition_uid=td_id)
+        try:
+            job_id = tr.get_id(run_details)
+        except Exception:
+            job_id = run_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
 
     print(f"[orchestrator] Submitted {job_name}, job_id={job_id}")
 
