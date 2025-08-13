@@ -111,6 +111,13 @@ def _resolve_software_spec_id(client, preferred_names: List[str]) -> str:
 
 
 def submit_training_job(client, job_name: str, script_path: str, software_spec_name: str, hardware_name: str, hardware_nodes: int, wait: bool = False) -> Optional[str]:
+    # Ensure the SDK supports training definitions API
+    if not hasattr(client, "training_definitions"):
+        raise RuntimeError(
+            "Your installed ibm-watson-machine-learning client does not support training_definitions. "
+            "Please upgrade the package in your venv: pip install -U ibm-watson-machine-learning. "
+            "After upgrading, retry with --real."
+        )
     td = client.training_definitions
     tr = client.training
 
