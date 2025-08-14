@@ -140,24 +140,71 @@ def submit_training_job(client, job_name: str, script_path: str, software_spec_n
         except Exception:
             job_id = run_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
     else:
-        # Repository fallback (compatible with ibm-watson-machine-learning 1.0.333)
+        # Repository fallback (compatible with multiple ibm-watson-machine-learning SDK variants)
         repo = client.repository
         tr = client.training
+
+        # Try to find a MetaNames class that matches training definitions across SDK versions
+        repo_meta_names = None
+        for candidate_attr in ("DefinitionMetaNames", "TrainingDefinitionMetaNames"):
+            if hasattr(repo, candidate_attr):
+                repo_meta_names = getattr(repo, candidate_attr)
+                break
+        if repo_meta_names is None and hasattr(tr, "DefinitionMetaNames"):
+            # Some versions expose it under training
+            repo_meta_names = getattr(tr, "DefinitionMetaNames")
+
+        def resolve_meta_key(attribute_name: str, default_key: str) -> str:
+            try:
+                if repo_meta_names is not None and hasattr(repo_meta_names, attribute_name):
+                    return getattr(repo_meta_names, attribute_name)
+            except Exception:
+                pass
+            return default_key
+
         meta = {
-            repo.DefinitionMetaNames.NAME: job_name,
-            repo.DefinitionMetaNames.DESCRIPTION: f"Training job for {job_name}",
-            repo.DefinitionMetaNames.SOFTWARE_SPEC_UID: sw_id,
-            repo.DefinitionMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
-            repo.DefinitionMetaNames.COMMAND: command,
+            resolve_meta_key("NAME", "name"): job_name,
+            resolve_meta_key("DESCRIPTION", "description"): f"Training job for {job_name}",
+            resolve_meta_key("SOFTWARE_SPEC_UID", "software_spec_uid"): sw_id,
+            resolve_meta_key("HARDWARE_SPEC", "hardware_spec"): {"name": hardware_name, "nodes": int(hardware_nodes)},
+            resolve_meta_key("COMMAND", "command"): command,
         }
         print(f"[orchestrator] Creating training definition (repository) for {job_name} (software_spec={software_spec_name}, hardware={hardware_name} x{hardware_nodes})")
-        td_details = repo.store_training_definition(training_definition=code_zip, meta_props=meta)
+        # Try multiple repository store methods/args for cross-version compatibility
+        td_details = None
+        last_exc = None
+        for method_name in ("store_training_definition", "store_definition", "store"):
+            store_method = getattr(repo, method_name, None)
+            if store_method is None:
+                continue
+            # Try with parameter name training_definition
+            try:
+                td_details = store_method(training_definition=code_zip, meta_props=meta)
+                break
+            except Exception as exc:
+                last_exc = exc
+                # Try alternate parameter name: definition
+                try:
+                    td_details = store_method(definition=code_zip, meta_props=meta)  # type: ignore[call-arg]
+                    break
+                except Exception as exc2:  # noqa: F841
+                    last_exc = exc2
+                    continue
+        if td_details is None:
+            raise RuntimeError(f"Unable to store training definition in repository: {last_exc}")
         try:
             td_id = repo.get_definition_uid(td_details)
         except Exception:
-            td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+            try:
+                td_id = repo.get_definition_id(td_details)  # type: ignore[attr-defined]
+            except Exception:
+                td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
         print(f"[orchestrator] Submitting training run for {job_name}...")
-        run_details = tr.run(training_definition_uid=td_id)
+        # Handle SDKs expecting different parameter names
+        try:
+            run_details = tr.run(training_definition_id=td_id)
+        except TypeError:
+            run_details = tr.run(training_definition_uid=td_id)
         try:
             job_id = tr.get_id(run_details)
         except Exception:
