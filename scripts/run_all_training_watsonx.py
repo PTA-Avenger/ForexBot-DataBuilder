@@ -1,6 +1,8 @@
 import argparse
 import os
 import time
+import tempfile
+import zipfile
 from typing import Dict, List, Tuple, Optional
 
 from config import get_space_id, get_wml_credentials
@@ -37,17 +39,25 @@ def collect_datasets(base_dir: str) -> Dict[str, str]:
     }
 
 
-def upload_datasets(client, datasets: Dict[str, str], dry_run: bool = False) -> None:
+def upload_datasets(client, datasets: Dict[str, str], dry_run: bool = False) -> Dict[str, Optional[str]]:
+    uploaded: Dict[str, Optional[str]] = {}
     for name, path in datasets.items():
         if not os.path.exists(path):
             print(f"[orchestrator] Missing dataset: {path}")
+            uploaded[name] = None
             continue
         if dry_run:
             print(f"[orchestrator] DRY-RUN: would upload data asset '{name}' from {path}")
+            uploaded[name] = None
             continue
         print(f"[orchestrator] Uploading data asset '{name}' from {path}...")
-        # The SDK expects a string name, not a metadata dict
-        client.data_assets.create(name=name, file_path=path)
+        details = client.data_assets.create(name=name, file_path=path)
+        try:
+            asset_id = details.get("metadata", {}).get("asset_id") or details.get("asset_id")
+        except Exception:
+            asset_id = None
+        uploaded[name] = asset_id
+    return uploaded
 
 
 def planned_jobs() -> List[Tuple[str, str, str]]:
@@ -73,10 +83,80 @@ def list_spaces() -> None:
     client = create_wml_base_client()
     print("[orchestrator] Accessible deployment spaces:")
     try:
-        # This prints a table in the SDK; also provide programmatic fallbacks if needed
         client.spaces.list()
     except Exception as exc:  # pragma: no cover
         print(f"[orchestrator] Unable to list spaces: {exc}")
+
+
+def _zip_code(script_path: str) -> str:
+    tmp_dir = tempfile.mkdtemp(prefix="wml_pkg_")
+    zip_path = os.path.join(tmp_dir, os.path.splitext(os.path.basename(script_path))[0] + ".zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Put the script at the root of the package
+        zf.write(script_path, arcname=os.path.basename(script_path))
+    return zip_path
+
+
+def _resolve_software_spec_id(client, preferred_names: List[str]) -> str:
+    for name in preferred_names:
+        try:
+            sw_id = client.software_specifications.get_id_by_name(name)
+            if sw_id:
+                return sw_id
+        except Exception:
+            continue
+    raise RuntimeError(
+        "Could not resolve a software specification id. Specify one explicitly with --software-spec-name."
+    )
+
+
+def submit_training_job(client, job_name: str, script_path: str, software_spec_name: str, hardware_name: str, hardware_nodes: int, wait: bool = False) -> Optional[str]:
+    td = client.training_definitions
+    tr = client.training
+
+    sw_id = _resolve_software_spec_id(client, [software_spec_name, "default_py3.10", "runtime-22.2-py3.10", "python-3.10"])
+
+    code_zip = _zip_code(script_path)
+    command = f"python {os.path.basename(script_path)}"
+
+    meta = {
+        td.ConfigurationMetaNames.NAME: job_name,
+        td.ConfigurationMetaNames.DESCRIPTION: f"Training job for {job_name}",
+        td.ConfigurationMetaNames.SOFTWARE_SPEC_UID: sw_id,
+        td.ConfigurationMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
+        td.ConfigurationMetaNames.COMMAND: command,
+    }
+
+    print(f"[orchestrator] Creating training definition for {job_name} (software_spec={software_spec_name}, hardware={hardware_name} x{hardware_nodes})")
+    td_details = td.store(meta_props=meta, training_definition=code_zip)
+    try:
+        td_id = td.get_id(td_details)
+    except Exception:
+        td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+
+    print(f"[orchestrator] Submitting training run for {job_name}...")
+    run_details = tr.run(training_definition_id=td_id)
+    try:
+        job_id = tr.get_id(run_details)
+    except Exception:
+        job_id = run_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+
+    print(f"[orchestrator] Submitted {job_name}, job_id={job_id}")
+
+    if wait:
+        while True:
+            try:
+                status = tr.get_status(job_id)
+                state = status.get("state") or status.get("status")
+                print(f"[orchestrator] {job_name} status: {state}")
+                if str(state).lower() in {"completed", "failed", "canceled", "error"}:
+                    break
+            except Exception as exc:
+                print(f"[orchestrator] Error fetching status: {exc}")
+                break
+            time.sleep(15)
+
+    return job_id
 
 
 def main(argv: List[str]) -> int:
@@ -85,6 +165,12 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Log intended actions without calling remote services")
     parser.add_argument("--space-id", type=str, default=None, help="Override SPACE_ID environment variable")
     parser.add_argument("--list-spaces", action="store_true", help="List accessible deployment spaces and exit")
+    parser.add_argument("--real", action="store_true", help="Submit real training jobs instead of simulated launches")
+    parser.add_argument("--software-spec-name", type=str, default="runtime-24.1-py3.11", help="Software spec name to use for jobs")
+    parser.add_argument("--hardware-name-cpu", type=str, default="S", help="Hardware spec name for CPU jobs")
+    parser.add_argument("--hardware-name-gpu", type=str, default="S", help="Hardware spec name for GPU jobs")
+    parser.add_argument("--hardware-nodes", type=int, default=1, help="Number of nodes for each job")
+    parser.add_argument("--wait", action="store_true", help="Wait for submitted jobs to complete")
     args = parser.parse_args(argv)
 
     datasets = collect_datasets(os.path.abspath(args.data_dir))
@@ -102,10 +188,8 @@ def main(argv: List[str]) -> int:
     # Resolve space id
     space_id: Optional[str] = args.space_id if args.space_id else None
     if not space_id:
-        # Will raise helpful error if not set
         space_id = get_space_id()
 
-    # Create client and set space, with helpful guidance if it fails
     try:
         client = create_wml_client_with_space(space_id)
     except Exception as exc:
@@ -118,7 +202,27 @@ def main(argv: List[str]) -> int:
             pass
         return 2
 
-    upload_datasets(client, datasets)
+    uploaded_asset_ids = upload_datasets(client, datasets)
+
+    if args.real:
+        jobs = planned_jobs()
+        for job_name, script, runtime in jobs:
+            hardware_name = args.hardware_name_gpu if runtime == "gpu" else args.hardware_name_cpu
+            try:
+                submit_training_job(
+                    client=client,
+                    job_name=job_name,
+                    script_path=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", script)),
+                    software_spec_name=args.software_spec_name,
+                    hardware_name=hardware_name,
+                    hardware_nodes=args.hardware_nodes,
+                    wait=args.wait,
+                )
+            except Exception as exc:
+                print(f"[orchestrator] Failed to submit job {job_name}: {exc}")
+        return 0
+
+    # Default simulated launch if --real not provided
     launch_jobs(client, planned_jobs())
     return 0
 
