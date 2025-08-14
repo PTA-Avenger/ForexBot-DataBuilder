@@ -143,13 +143,23 @@ def submit_training_job(client, job_name: str, script_path: str, software_spec_n
         # Repository fallback (compatible with ibm-watson-machine-learning 1.0.333)
         repo = client.repository
         tr = client.training
-        meta = {
-            repo.DefinitionMetaNames.NAME: job_name,
-            repo.DefinitionMetaNames.DESCRIPTION: f"Training job for {job_name}",
-            repo.DefinitionMetaNames.SOFTWARE_SPEC_UID: sw_id,
-            repo.DefinitionMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
-            repo.DefinitionMetaNames.COMMAND: command,
-        }
+        if hasattr(repo, "DefinitionMetaNames"):
+            meta = {
+                repo.DefinitionMetaNames.NAME: job_name,
+                repo.DefinitionMetaNames.DESCRIPTION: f"Training job for {job_name}",
+                repo.DefinitionMetaNames.SOFTWARE_SPEC_UID: sw_id,
+                repo.DefinitionMetaNames.HARDWARE_SPEC: {"name": hardware_name, "nodes": int(hardware_nodes)},
+                repo.DefinitionMetaNames.COMMAND: command,
+            }
+        else:
+            # Fallback to raw keys expected by older client
+            meta = {
+                "name": job_name,
+                "description": f"Training job for {job_name}",
+                "software_spec_uid": sw_id,
+                "hardware_spec": {"name": hardware_name, "nodes": int(hardware_nodes)},
+                "command": command,
+            }
         print(f"[orchestrator] Creating training definition (repository) for {job_name} (software_spec={software_spec_name}, hardware={hardware_name} x{hardware_nodes})")
         td_details = repo.store_training_definition(training_definition=code_zip, meta_props=meta)
         try:
@@ -157,7 +167,11 @@ def submit_training_job(client, job_name: str, script_path: str, software_spec_n
         except Exception:
             td_id = td_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
         print(f"[orchestrator] Submitting training run for {job_name}...")
-        run_details = tr.run(training_definition_uid=td_id)
+        # Older clients use "training_definition_uid"; try both
+        try:
+            run_details = tr.run(training_definition_uid=td_id)
+        except TypeError:
+            run_details = tr.run(training_definition_id=td_id)
         try:
             job_id = tr.get_id(run_details)
         except Exception:
