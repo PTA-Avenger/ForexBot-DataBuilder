@@ -145,14 +145,15 @@ def main(argv: List[str]) -> int:
     # Batch classify for speed
     batch_size = 16
     for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        outputs = classifier(batch)
-        for (date_iso, ticker), out in zip(meta[i : i + batch_size], outputs):
+        batch_texts = texts[i : i + batch_size]
+        batch_meta = meta[i : i + batch_size]
+        outputs = classifier(batch_texts)
+        for (date_iso, ticker), text, out in zip(batch_meta, batch_texts, outputs):
             label_str = out["label"].lower()
             label = FINBERT_TO_LABEL.get(label_str)
             if label is None:
                 continue
-            rows.append((date_iso, ticker, batch[outputs.index(out)], label))
+            rows.append((date_iso, ticker, text, label))
 
     if not rows:
         print("[reddit] No labeled rows to write.")
