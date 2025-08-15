@@ -191,7 +191,43 @@ def submit_training_job(client, job_name: str, script_path: str, software_spec_n
                     last_exc = exc2
                     continue
         if td_details is None:
-            raise RuntimeError(f"Unable to store training definition in repository: {last_exc}")
+            # Try direct training API as a fallback when repository does not support training definitions
+            print("[orchestrator] Repository does not support training definition storage. Trying direct training API...")
+            run_details = None
+            last_run_exc = None
+            for method_name in ("run", "create"):
+                run_method = getattr(tr, method_name, None)
+                if run_method is None:
+                    continue
+                for def_arg in ("training_definition", "definition"):
+                    try:
+                        run_details = run_method(**{def_arg: code_zip}, meta_props=meta)  # type: ignore[arg-type]
+                        break
+                    except Exception as exc:
+                        last_run_exc = exc
+                        continue
+                if run_details is not None:
+                    break
+            if run_details is None:
+                raise RuntimeError(f"Unable to store training definition in repository: {last_exc}; and direct training API failed: {last_run_exc}")
+            try:
+                job_id = tr.get_id(run_details)
+            except Exception:
+                job_id = run_details.get("metadata", {}).get("id")  # type: ignore[attr-defined]
+            print(f"[orchestrator] Submitted {job_name}, job_id={job_id}")
+            if wait:
+                while True:
+                    try:
+                        status = tr.get_status(job_id)
+                        state = status.get("state") or status.get("status")
+                        print(f"[orchestrator] {job_name} status: {state}")
+                        if str(state).lower() in {"completed", "failed", "canceled", "error"}:
+                            break
+                    except Exception as exc:
+                        print(f"[orchestrator] Error fetching status: {exc}")
+                        break
+                    time.sleep(15)
+            return job_id
         try:
             td_id = repo.get_definition_uid(td_details)
         except Exception:
