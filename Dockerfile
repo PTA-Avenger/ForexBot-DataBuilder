@@ -10,13 +10,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps commonly needed for ML builds and pip
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
 # Install Python deps first for layer caching
 COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip \
