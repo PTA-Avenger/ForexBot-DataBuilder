@@ -11,4 +11,5 @@ ta
 torch
 accelerate
 ibm-watson-machine-learning
+ibm-watsonx-ai
 python-dotenv

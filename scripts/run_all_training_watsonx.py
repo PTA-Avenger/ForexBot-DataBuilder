@@ -276,6 +276,7 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--hardware-name-gpu", type=str, default="S", help="Hardware spec name for GPU jobs")
     parser.add_argument("--hardware-nodes", type=int, default=1, help="Number of nodes for each job")
     parser.add_argument("--wait", action="store_true", help="Wait for submitted jobs to complete")
+    parser.add_argument("--use-container", action="store_true", help="Skip WML training API and print docker run commands or rely on pipelines")
     args = parser.parse_args(argv)
 
     datasets = collect_datasets(os.path.abspath(args.data_dir))
@@ -288,6 +289,17 @@ def main(argv: List[str]) -> int:
 
     if args.list_spaces:
         list_spaces()
+        return 0
+
+    if args.use_container:
+        print("[orchestrator] --use-container specified. Skipping WML job submission.")
+        print("[orchestrator] Build the image:")
+        print("  docker build -t forexbot-trainer:latest .")
+        print("[orchestrator] Example local runs:")
+        print("  docker run --rm -v $PWD/data:/app/data forexbot-trainer:latest scripts/train_lstm_watsonx.py --dataset data/processed/trend_dataset.csv")
+        print("  docker run --rm -v $PWD/data:/app/data forexbot-trainer:latest scripts/train_xgboost_watsonx.py --dataset data/processed/meanrev_dataset.csv")
+        print("  docker run --rm -v $PWD/data:/app/data forexbot-trainer:latest scripts/train_finbert_watsonx.py --dataset data/processed/sentiment.csv")
+        print("[orchestrator] For pipelines, push the image and apply pipelines/tekton-pipeline.yaml in your cluster.")
         return 0
 
     # Resolve space id
