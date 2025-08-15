@@ -1,0 +1,208 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: forexbot-train-pipeline
+spec:
+  params:
+    - name: image
+      description: Container image to use for steps
+      default: icr.io/your-namespace/forexbot-trainer:latest
+    - name: space_id
+      description: Watsonx/WML space id
+    - name: wml_url
+      description: WML URL, e.g. https://us-south.ml.cloud.ibm.com
+    - name: ibm_cloud_api_key
+      description: API key for authentication
+    - name: trend_asset_name
+      default: trend
+    - name: meanrev_asset_name
+      default: meanrev
+    - name: sentiment_asset_name
+      default: sentiment
+  workspaces:
+    - name: shared-workspace
+  tasks:
+    - name: download-trend
+      taskSpec:
+        params:
+          - name: image
+          - name: space_id
+          - name: wml_url
+          - name: ibm_cloud_api_key
+          - name: trend_asset_name
+        workspaces:
+          - name: shared-workspace
+        steps:
+          - name: download
+            image: $(params.image)
+            workingDir: /workspace
+            env:
+              - name: SPACE_ID
+                value: $(params.space_id)
+              - name: WML_URL
+                value: $(params.wml_url)
+              - name: IBM_CLOUD_API_KEY
+                value: $(params.ibm_cloud_api_key)
+            script: |
+              #!/bin/sh
+              set -euo pipefail
+              python scripts/download_asset.py --asset-name "$(params.trend_asset_name)" --output-path data/processed/trend_dataset.csv
+        metadata: {}
+      params:
+        - name: image
+          value: $(params.image)
+        - name: space_id
+          value: $(params.space_id)
+        - name: wml_url
+          value: $(params.wml_url)
+        - name: ibm_cloud_api_key
+          value: $(params.ibm_cloud_api_key)
+        - name: trend_asset_name
+          value: $(params.trend_asset_name)
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: train-lstm
+      runAfter:
+        - download-trend
+      taskSpec:
+        params:
+          - name: image
+        workspaces:
+          - name: shared-workspace
+        steps:
+          - name: run
+            image: $(params.image)
+            workingDir: /workspace
+            script: |
+              #!/bin/sh
+              set -euo pipefail
+              python scripts/train_lstm_watsonx.py --dataset data/processed/trend_dataset.csv --epochs 5 --batch-size 128 --learning-rate 0.001
+      params:
+        - name: image
+          value: $(params.image)
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: download-meanrev
+      taskSpec:
+        params:
+          - name: image
+          - name: space_id
+          - name: wml_url
+          - name: ibm_cloud_api_key
+          - name: meanrev_asset_name
+        workspaces:
+          - name: shared-workspace
+        steps:
+          - name: download
+            image: $(params.image)
+            workingDir: /workspace
+            env:
+              - name: SPACE_ID
+                value: $(params.space_id)
+              - name: WML_URL
+                value: $(params.wml_url)
+              - name: IBM_CLOUD_API_KEY
+                value: $(params.ibm_cloud_api_key)
+            script: |
+              #!/bin/sh
+              set -euo pipefail
+              python scripts/download_asset.py --asset-name "$(params.meanrev_asset_name)" --output-path data/processed/meanrev_dataset.csv
+      params:
+        - name: image
+          value: $(params.image)
+        - name: space_id
+          value: $(params.space_id)
+        - name: wml_url
+          value: $(params.wml_url)
+        - name: ibm_cloud_api_key
+          value: $(params.ibm_cloud_api_key)
+        - name: meanrev_asset_name
+          value: $(params.meanrev_asset_name)
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: train-xgboost
+      runAfter:
+        - download-meanrev
+      taskSpec:
+        params:
+          - name: image
+        workspaces:
+          - name: shared-workspace
+        steps:
+          - name: run
+            image: $(params.image)
+            workingDir: /workspace
+            script: |
+              #!/bin/sh
+              set -euo pipefail
+              python scripts/train_xgboost_watsonx.py --dataset data/processed/meanrev_dataset.csv --n-estimators 500 --max-depth 6 --learning-rate 0.05
+      params:
+        - name: image
+          value: $(params.image)
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: download-sentiment
+      taskSpec:
+        params:
+          - name: image
+          - name: space_id
+          - name: wml_url
+          - name: ibm_cloud_api_key
+          - name: sentiment_asset_name
+        workspaces:
+          - name: shared-workspace
+        steps:
+          - name: download
+            image: $(params.image)
+            workingDir: /workspace
+            env:
+              - name: SPACE_ID
+                value: $(params.space_id)
+              - name: WML_URL
+                value: $(params.wml_url)
+              - name: IBM_CLOUD_API_KEY
+                value: $(params.ibm_cloud_api_key)
+            script: |
+              #!/bin/sh
+              set -euo pipefail
+              python scripts/download_asset.py --asset-name "$(params.sentiment_asset_name)" --output-path data/processed/sentiment.csv
+      params:
+        - name: image
+          value: $(params.image)
+        - name: space_id
+          value: $(params.space_id)
+        - name: wml_url
+          value: $(params.wml_url)
+        - name: ibm_cloud_api_key
+          value: $(params.ibm_cloud_api_key)
+        - name: sentiment_asset_name
+          value: $(params.sentiment_asset_name)
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: train-finbert
+      runAfter:
+        - download-sentiment
+      taskSpec:
+        params:
+          - name: image
+        workspaces:
+          - name: shared-workspace
+        steps:
+          - name: run
+            image: $(params.image)
+            workingDir: /workspace
+            script: |
+              #!/bin/sh
+              set -euo pipefail
+              python scripts/train_finbert_watsonx.py --dataset data/processed/sentiment.csv --epochs 3 --batch-size 16 --learning-rate 2e-5
+      params:
+        - name: image
+          value: $(params.image)
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
